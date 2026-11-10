@@ -215,7 +215,9 @@ prefix_pids() {   # PIDs of processes running in this prefix
   local p
   for p in /proc/[0-9]*; do
     [[ -O $p && ${p#/proc/} != "$$" ]] || continue
-    { tr '\0' '\n' <"$p/environ"; } 2>/dev/null | grep -qxF "WINEPREFIX=$PFX" && echo "${p#/proc/}"
+    # Proton exports WINEPREFIX with a trailing slash ("…/pfx/"), plain Wine usually without
+    { tr '\0' '\n' <"$p/environ"; } 2>/dev/null |
+      grep -qxF -e "WINEPREFIX=$PFX" -e "WINEPREFIX=$PFX/" && echo "${p#/proc/}"
   done
 }
 
