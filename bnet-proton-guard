@@ -371,5 +371,5 @@ case $ACTION in
   --restore) resolve_prefix && { do_kill; do_restore; } ;;
   --kill)    resolve_prefix && do_kill ;;
   --rebuild) resolve_prefix && do_rebuild "${1:-}" ;;
-  "")        (( $# )) && wrapper "$@" || { sed -n '2,29p' "$0"; exit 0; } ;;
+  "")        if (( $# )); then wrapper "$@"; else sed -n '2,29p' "$0"; exit 0; fi ;;
 esac
