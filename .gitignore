@@ -1,0 +1,12 @@
+# editors
+*.swp
+*~
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# local test runs / logs
+*.log
+/tmp/

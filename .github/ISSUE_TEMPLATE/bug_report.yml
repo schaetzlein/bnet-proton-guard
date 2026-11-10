@@ -1,0 +1,68 @@
+name: Bug report
+description: Battle.net still does not start, or bnet-proton-guard misbehaves
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please remove personal data (user names in paths, account names) from logs before posting.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution
+      placeholder: e.g. Ubuntu 24.04, Fedora 41, Arch, SteamOS 3.6
+    validations:
+      required: true
+  - type: dropdown
+    id: steam
+    attributes:
+      label: Steam variant
+      options:
+        - Native package (distro / Valve .deb)
+        - Flatpak
+        - Snap
+        - Steam Deck / SteamOS
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: proton
+    attributes:
+      label: Proton version
+      placeholder: e.g. GE-Proton10-34, Proton 10.0, Proton Experimental
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: bnet-proton-guard version
+      description: Output of `bnet-proton-guard --version`
+      placeholder: bnet-proton-guard 1.0
+  - type: textarea
+    id: check
+    attributes:
+      label: Output of `bnet-proton-guard --check`
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: protonlog
+    attributes:
+      label: PROTON_LOG excerpt
+      description: |
+        Set the launch option to `PROTON_LOG=1 bnet-proton-guard %command%`, start Battle.net once and paste
+        the relevant part of `~/steam-<appid>.log` (the lines around the first error are usually enough).
+      render: text
+  - type: textarea
+    id: guardlog
+    attributes:
+      label: bnet-proton-guard log (optional)
+      description: Last lines of `~/.local/share/bnet-proton-guard/bnet-proton-guard.log`
+      render: text
