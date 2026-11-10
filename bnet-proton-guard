@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# bnet-proton-guard – keeps a Battle.net Proton prefix (Steam non-Steam shortcut) healthy
+#
+# A game crash can leave the Wine registry (system.reg) corrupted. Battle.net
+# then flashes "Running" in Steam for a second and quits, with any Proton
+# version. bnet-proton-guard backs up the registry on every launch and automatically
+# restores the last good copy when it finds it broken.
+#
+# Quick start:
+#   bnet-proton-guard --setup         interactive: find the prefix, install the script,
+#                              print the Steam launch option to use
+#
+# Steam launch option (Battle.net shortcut → Properties → Launch Options):
+#   /full/path/to/bnet-proton-guard %command%
+#
+# Manual commands:
+#   bnet-proton-guard --check                 check the registry of the prefix
+#   bnet-proton-guard --backup                back up the registry now
+#   bnet-proton-guard --restore               restore the newest good backup
+#   bnet-proton-guard --kill                  kill stuck processes of this prefix
+#   bnet-proton-guard --rebuild [Setup.exe]   recreate the prefix and reinstall
+#                                      Battle.net (Steam shortcut stays as is)
+#
+# Options:
+#   --prefix DIR   use this compatdata folder (…/steamapps/compatdata/<id>)
+#   --yes          never ask, take the default answers
+#
+# Settings: ~/.config/bnet-proton-guard/config   Backups: ~/.local/share/bnet-proton-guard/
+
+set -uo pipefail
+
+VERSION=1.0
+KEEP=${BNET_GUARD_KEEP:-5}
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/bnet-proton-guard"
+CONF="$CONF_DIR/config"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bnet-proton-guard"
+REGS=(system.reg user.reg userdef.reg)
+LAUNCHER_REL="pfx/drive_c/Program Files (x86)/Battle.net/Battle.net Launcher.exe"
+ASSUME_YES=0
+COMPAT=""
+
+# migrate settings and backups from the old name "bnet-guard"
+_old_conf="${XDG_CONFIG_HOME:-$HOME/.config}/bnet-guard"
+_old_data="${XDG_DATA_HOME:-$HOME/.local/share}/bnet-guard"
+[[ -d $_old_conf && ! -e $CONF_DIR ]] && mv "$_old_conf" "$CONF_DIR"
+[[ -d $_old_data && ! -e $DATA_DIR ]] && mv "$_old_data" "$DATA_DIR"
+
+mkdir -p "$DATA_DIR"
+LOG="$DATA_DIR/bnet-proton-guard.log"
+
+# ---------- helpers ----------------------------------------------------------
+
+if [[ -t 2 && -z ${NO_COLOR:-} ]]; then
+  C_RED=$'\e[1;31m' C_YEL=$'\e[1;33m' C_GRN=$'\e[1;32m' C_BLD=$'\e[1m' C_RST=$'\e[0m'
+else
+  C_RED="" C_YEL="" C_GRN="" C_BLD="" C_RST=""
+fi
+
+_log()  { printf '%s %s\n' "$(date '+%F %T')" "$2" >>"$LOG"; printf '%s%s%s\n' "$1" "$2" "$C_RST" >&2; }
+log()   { _log "" "$*"; }
+ok()    { _log "$C_GRN" "$*"; }
+warn()  { _log "$C_YEL" "WARNING: $*"; }
+die()   { _log "$C_RED" "ERROR: $*"; exit 1; }
+notify() { command -v notify-send >/dev/null 2>&1 && notify-send -a bnet-proton-guard "Battle.net" "$*" || true; }
+interactive() { [[ $ASSUME_YES -eq 0 && -t 0 && -t 2 ]]; }
+
+ask_yn() {  # ask_yn "Question" default(y|n)
+  local q=$1 def=${2:-y} a
+  interactive || { [[ $def == y ]]; return; }
+  read -r -p "$q [$( [[ $def == y ]] && echo Y/n || echo y/N )] " a
+  a=${a:-$def}
+  [[ ${a,,} == y* || ${a,,} == j* ]]
+}
+
+pick() {    # pick "Prompt" item...   → prints chosen item (first one if non-interactive)
+  local prompt=$1; shift
+  (( $# )) || return 1
+  if (( $# == 1 )) || ! interactive; then printf '%s\n' "$1"; return 0; fi
+  local i=1 item n
+  echo "$prompt" >&2
+  for item; do echo "  $i) $item" >&2; i=$((i + 1)); done
+  while true; do
+    read -r -p "Number [1]: " n
+    n=${n:-1}
+    if [[ $n =~ ^[0-9]+$ ]] && (( n >= 1 && n <= $# )); then printf '%s\n' "${!n}"; return 0; fi
+    echo "Please enter 1-$#." >&2
+  done
+}
+
+steam_roots() {
+  local d
+  for d in "$HOME/.steam/steam" \
+           "$HOME/.local/share/Steam" \
+           "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam" \
+           "$HOME/snap/steam/common/.local/share/Steam"; do
+    [[ -d $d/steamapps ]] && readlink -f "$d"
+  done | sort -u
+}
+
+find_prefixes() {
+  local r c
+  while IFS= read -r r; do
+    while IFS= read -r c; do
+      [[ -f $c/$LAUNCHER_REL ]] && echo "$c"
+    done < <(find "$r/steamapps/compatdata" -mindepth 1 -maxdepth 1 -type d ! -name '*.bak*' 2>/dev/null)
+  done < <(steam_roots)
+}
+
+find_protons() {   # newest first, GE-Proton and Valve Proton
+  local r
+  while IFS= read -r r; do
+    find "$r/compatibilitytools.d" "$r/steamapps/common" -mindepth 1 -maxdepth 1 -type d \
+         \( -name 'GE-Proton*' -o -name 'Proton*' \) 2>/dev/null
+  done < <(steam_roots) |
+  while IFS= read -r p; do [[ -x $p/proton ]] && echo "$p"; done |
+  awk -F/ '{r = ($NF ~ /^GE-Proton/) ? 0 : 1; print r "\t" $NF "\t" $0}' |
+  sort -t $'\t' -k1,1n -k2,2Vr | cut -f3-
+}
+
+download_dir() {
+  local d
+  d=$(command -v xdg-user-dir >/dev/null 2>&1 && xdg-user-dir DOWNLOAD 2>/dev/null)
+  [[ -d ${d:-} ]] && echo "$d" || echo "$HOME/Downloads"
+}
+
+# ---------- prefix selection --------------------------------------------------
+
+resolve_prefix() {   # sets COMPAT, PFX, STEAM_ROOT, BACKUP_DIR
+  local mode=${1:-manual}
+  if [[ -z $COMPAT && -n ${STEAM_COMPAT_DATA_PATH:-} ]]; then COMPAT=$STEAM_COMPAT_DATA_PATH; fi
+  if [[ -z $COMPAT && -f $CONF ]]; then
+    # shellcheck disable=SC1090
+    COMPAT=$(. "$CONF"; echo "${BNET_PREFIX:-}")
+  fi
+  if [[ -z $COMPAT ]]; then
+    [[ $mode == wrapper ]] && return 1
+    mapfile -t found < <(find_prefixes)
+    if (( ${#found[@]} == 0 )); then
+      die "No Battle.net prefix found. Add Battle.net-Setup.exe to Steam as a non-Steam game,
+force a Proton version under Properties → Compatibility, install Battle.net once,
+then run 'bnet-proton-guard --setup' again."
+    fi
+    COMPAT=$(pick "Several Battle.net prefixes found – which one?" "${found[@]}") || return 1
+  fi
+  COMPAT=${COMPAT%/}
+  PFX="$COMPAT/pfx"
+  STEAM_ROOT=${STEAM_COMPAT_CLIENT_INSTALL_PATH:-${COMPAT%/steamapps/compatdata/*}}
+  BACKUP_DIR="$DATA_DIR/$(basename "$COMPAT")"
+  mkdir -p "$BACKUP_DIR"
+}
+
+save_config() {
+  mkdir -p "$CONF_DIR"
+  printf '# bnet-proton-guard settings\nBNET_PREFIX=%q\n' "$COMPAT" >"$CONF"
+}
+
+# ---------- registry checks / backups ----------------------------------------
+
+reg_ok() {
+  local f=$1
+  [[ -s $f ]] || return 1
+  [[ $(head -n1 "$f" | tr -d '\r\0') == "WINE REGISTRY Version 2" ]] || return 1
+  grep -a -q -m1 '^#arch=win64' "$f"
+}
+
+dir_ok() { local d=$1 r; for r in "${REGS[@]}"; do reg_ok "$d/$r" || return 1; done; }
+
+backups() { find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name '20*' 2>/dev/null | sort -r; }
+
+latest_good_backup() {
+  local d
+  while IFS= read -r d; do dir_ok "$d" && { echo "$d"; return 0; }; done < <(backups)
+  return 1
+}
+
+do_check() {
+  local r bad=0
+  echo "Prefix:  $COMPAT"
+  for r in "${REGS[@]}"; do
+    if reg_ok "$PFX/$r"; then echo "  ${C_GRN}OK${C_RST}      $r"; else echo "  ${C_RED}BROKEN${C_RST}  $r"; bad=1; fi
+  done
+  echo "Backups: $(backups | wc -l) in $BACKUP_DIR"
+  return $bad
+}
+
+do_backup() {
+  dir_ok "$PFX" || { warn "Registry is not OK – no backup made."; return 1; }
+  local last dest r
+  last=$(backups | head -n1)
+  if [[ -n $last ]] && cmp -s "$last/system.reg" "$PFX/system.reg" && cmp -s "$last/user.reg" "$PFX/user.reg"; then
+    return 0
+  fi
+  dest="$BACKUP_DIR/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$dest"
+  for r in "${REGS[@]}"; do cp -p "$PFX/$r" "$dest/"; done
+  backups | tail -n +$((KEEP + 1)) | xargs -r -d '\n' rm -rf
+  ok "Backup created: $dest"
+}
+
+do_restore() {
+  local b broken r
+  b=$(latest_good_backup) || { warn "No valid backup available."; return 1; }
+  broken="$BACKUP_DIR/broken-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$broken"
+  for r in "${REGS[@]}"; do
+    [[ -e $PFX/$r ]] && cp -p "$PFX/$r" "$broken/"
+    cp -p "$b/$r" "$PFX/$r"
+  done
+  ok "Registry restored from $b (broken files kept in $broken)."
+}
+
+# ---------- processes ---------------------------------------------------------
+
+prefix_pids() {   # PIDs of processes running in this prefix
+  local p
+  for p in /proc/[0-9]*; do
+    [[ -O $p && ${p#/proc/} != "$$" ]] || continue
+    { tr '\0' '\n' <"$p/environ"; } 2>/dev/null | grep -qxF "WINEPREFIX=$PFX" && echo "${p#/proc/}"
+  done
+}
+
+do_kill() {
+  local pid n=0
+  for pid in $(prefix_pids); do kill -9 "$pid" 2>/dev/null && n=$((n + 1)); done
+  log "Stopped $n process(es) of this prefix."
+}
+
+wait_prefix_idle() {   # the Battle.net installer restarts itself, so wait for all of its processes
+  local shown=0
+  while [[ -n $(prefix_pids) ]]; do
+    if (( ! shown )); then
+      log "Waiting for the installer to finish … (close the Battle.net login window when it appears)"
+      shown=1
+    fi
+    sleep 2
+  done
+}
+
+# ---------- rebuild -----------------------------------------------------------
+
+do_rebuild() {
+  local setup=${1:-} proton old="(nothing)"
+  if [[ -z $setup ]]; then
+    setup=$(find "$(download_dir)" -maxdepth 1 -iname 'Battle.net-Setup*.exe' -printf '%T@ %p\n' 2>/dev/null |
+            sort -rn | head -n1 | cut -d' ' -f2-)
+  fi
+  if [[ -z $setup || ! -f $setup ]] && interactive; then
+    echo "Battle.net-Setup.exe not found. Download it from https://www.blizzard.com/download" >&2
+    read -r -e -p "Path to Battle.net-Setup.exe: " setup
+    setup=${setup/#\~/$HOME}
+  fi
+  [[ -f ${setup:-} ]] || die "Battle.net-Setup.exe not found. Usage: bnet-proton-guard --rebuild /path/to/Battle.net-Setup.exe"
+
+  mapfile -t protons < <(find_protons)
+  (( ${#protons[@]} )) || die "No Proton found (looked in compatibilitytools.d and steamapps/common)."
+  proton=$(pick "Which Proton should be used? (use the same one as in Steam)" "${protons[@]}") || exit 1
+
+  echo "This will move $COMPAT aside and install Battle.net fresh."
+  echo "Installed games outside the prefix (e.g. under Z:\\…) are not touched."
+  ask_yn "Continue?" y || exit 1
+
+  do_kill
+  if [[ -d $COMPAT ]]; then
+    old="$COMPAT.bak-$(date +%Y%m%d-%H%M%S)"
+    mv "$COMPAT" "$old" || die "Could not move $COMPAT"
+    log "Old prefix kept at: $old"
+  fi
+  mkdir -p "$COMPAT"
+  log "Installing Battle.net with $(basename "$proton") from $setup …"
+  STEAM_COMPAT_DATA_PATH="$COMPAT" STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_ROOT" \
+    "$proton/proton" run "$setup"
+  wait_prefix_idle
+  [[ -f $COMPAT/$LAUNCHER_REL ]] || die "Battle.net Launcher.exe was not created – the installer did not finish."
+  do_backup || true
+  ok "Battle.net installed."
+  cat >&2 <<EOF
+
+${C_BLD}Next steps:${C_RST}
+  1. Start Battle.net from Steam (shortcut and target stay unchanged).
+  2. Log in. For already installed games open the game's own page in Battle.net
+     and click "Locate the game" below the Install button (the "Scan for games"
+     dialog on the home page often finds nothing under Wine). Linux paths are
+     reachable via drive Z:, e.g. Z:\\home\\you\\Games\\World of Warcraft.
+  3. When everything works you can delete: $old
+EOF
+}
+
+# ---------- setup -------------------------------------------------------------
+
+do_setup() {
+  local self target bindir="$HOME/.local/bin"
+  resolve_prefix setup || exit 1
+  save_config
+  echo "Prefix:   $COMPAT"
+  echo "Settings: $CONF"
+
+  self=$(readlink -f "$0")
+  target=$self
+  if [[ $self != "$bindir/bnet-proton-guard" ]] && ask_yn "Install the script to $bindir/bnet-proton-guard?" y; then
+    mkdir -p "$bindir"
+    install -m 755 "$self" "$bindir/bnet-proton-guard"
+    target="$bindir/bnet-proton-guard"
+    ok "Installed: $target"
+    [[ :$PATH: == *":$bindir:"* ]] || warn "$bindir is not in your PATH yet (log out and in again on most distros)."
+  fi
+
+  echo
+  if do_check; then
+    do_backup || true
+  else
+    echo
+    warn "The registry is broken."
+    if latest_good_backup >/dev/null && ask_yn "Restore the last good backup?" y; then
+      do_kill; do_restore
+    elif ask_yn "Rebuild the prefix and reinstall Battle.net?" y; then
+      do_rebuild
+    fi
+  fi
+
+  cat <<EOF
+
+${C_BLD}Last step – in Steam:${C_RST}
+  Battle.net shortcut → Properties → Launch Options:
+
+    ${C_GRN}$target %command%${C_RST}
+
+From now on the registry is backed up on every launch and restored
+automatically if a crash breaks it.
+EOF
+}
+
+# ---------- wrapper (Steam launch option) -------------------------------------
+
+wrapper() {
+  if resolve_prefix wrapper && [[ -e $PFX/system.reg ]]; then
+    if dir_ok "$PFX"; then
+      do_backup 2>/dev/null || true
+    else
+      warn "Registry broken – trying to restore."
+      if do_restore; then
+        notify "The registry was broken and has been restored from a backup."
+      else
+        notify "The registry is broken and there is no backup. Run in a terminal: bnet-proton-guard --rebuild"
+      fi
+    fi
+  fi
+  exec "$@"
+}
+
+# ---------- main --------------------------------------------------------------
+
+ACTION=""
+while (( $# )); do
+  case $1 in
+    --prefix)  COMPAT=${2:-}; shift 2 ;;
+    --prefix=*) COMPAT=${1#*=}; shift ;;
+    --yes|-y)  ASSUME_YES=1; shift ;;
+    --setup|--check|--backup|--restore|--kill|--rebuild) ACTION=$1; shift; break ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
+    --version) echo "bnet-proton-guard $VERSION"; exit 0 ;;
+    *) break ;;
+  esac
+done
+
+case $ACTION in
+  --setup)   do_setup ;;
+  --check)   resolve_prefix && do_check ;;
+  --backup)  resolve_prefix && do_backup ;;
+  --restore) resolve_prefix && { do_kill; do_restore; } ;;
+  --kill)    resolve_prefix && do_kill ;;
+  --rebuild) resolve_prefix && do_rebuild "${1:-}" ;;
+  "")        (( $# )) && wrapper "$@" || { sed -n '2,29p' "$0"; exit 0; } ;;
+esac
