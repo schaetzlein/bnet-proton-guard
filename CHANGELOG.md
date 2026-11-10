@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- README rewritten to be easier to follow for beginners, with example output,
+  a section on which files the script changes and how to undo a repair.
+
+### Removed
+
+- GitHub Actions CI and the status badges. Run `make lint test` locally instead.
+
 ## [1.0] - 2026-11-10
 
 First public release.
