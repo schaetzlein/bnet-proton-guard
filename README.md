@@ -34,9 +34,11 @@ It finds Steam (native, Flatpak, Snap), your Battle.net prefixes and your Proton
 ## Installation
 
 ```sh
-curl -LO https://raw.githubusercontent.com/schaetzlein/bnet-proton-guard/main/bnet-proton-guard
+curl -LO https://github.com/schaetzlein/bnet-proton-guard/releases/latest/download/bnet-proton-guard
 bash bnet-proton-guard --setup
 ```
+
+This always downloads the script of the [latest release](https://github.com/schaetzlein/bnet-proton-guard/releases/latest).
 
 `--setup` finds your Battle.net prefix, installs the script to `~/.local/bin`, makes the first backup (or offers a repair if the registry is already broken) and prints the line for Steam.
 
