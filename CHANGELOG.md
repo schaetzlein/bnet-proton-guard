@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Unreleased
 
 ### Changed
 
@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - GitHub Actions CI and the status badges. Run `make lint test` locally instead.
+- GitHub releases and tags. The script is downloaded from the `main` branch.
 
-## [1.0] - 2026-11-10
+## 1.0 - 2026-11-10
 
 First public release.
 
@@ -38,6 +39,3 @@ First public release.
 - Automatic migration of settings and backups from the pre-release name `bnet-guard`.
 - Test suite (bats-core) with a fake Steam library, Battle.net prefix and Proton builds.
 - GitHub Actions CI running ShellCheck and the tests.
-
-[Unreleased]: https://github.com/schaetzlein/bnet-proton-guard/compare/v1.0...HEAD
-[1.0]: https://github.com/schaetzlein/bnet-proton-guard/releases/tag/v1.0

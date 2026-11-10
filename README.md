@@ -73,10 +73,11 @@ it has to choose.
 
 ## Install
 
-1. Download the script of the newest release:
+1. Download `bnet-proton-guard` from this page (click the file, then the
+   **Download raw file** button), or run:
 
    ```bash
-   curl -LO https://github.com/schaetzlein/bnet-proton-guard/releases/latest/download/bnet-proton-guard
+   curl -LO https://raw.githubusercontent.com/schaetzlein/bnet-proton-guard/main/bnet-proton-guard
    ```
 
 2. Run the setup:
